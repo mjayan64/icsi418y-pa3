@@ -12,6 +12,7 @@ function Signup() {
     event.preventDefault();
     setMessage("");
 
+    // ensure all fields are filled
     if (!fName.trim() || !lName.trim() || !username.trim() || !password) {
       setIsError(true);
       setMessage("All fields are required");
@@ -19,6 +20,7 @@ function Signup() {
     }
 
     try {
+      // Send signup request to server
       const response = await fetch("http://localhost:9000/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -30,10 +32,12 @@ function Signup() {
         }),
       });
 
+      // Display response from server
       const data = await response.json();
       setIsError(!response.ok);
       setMessage(data.message);
 
+      // Clear input fields after successful signup
       if (response.ok) {
         setFName("");
         setLName("");

@@ -15,6 +15,7 @@ app.get("/", (req, res) => {
   res.json({ message: "Server is running" });
 });
 
+// signup route
 app.post("/signup", async (req, res) => {
   const { f_name, l_name, username, password } = req.body;
 
@@ -56,6 +57,7 @@ app.post("/signup", async (req, res) => {
   }
 });
 
+// login route
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
@@ -91,6 +93,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
+// Mongo connection and server start
 async function startServer() {
   try {
     await client.connect();
