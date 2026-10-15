@@ -3,7 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
-const { MongoClient } = require("mongodb");
+const { MongoClient, ObjectId } = require("mongodb");
 
 const app = express();
 const client = new MongoClient(process.env.MONGO_URI);
@@ -15,9 +15,9 @@ app.get("/", (req, res) => {
   res.json({ message: "Server is running" });
 });
 
-// signup route
+// Create a registered user
 app.post("/signup", async (req, res) => {
-  const { f_name, l_name, username, password } = req.body;
+  const { f_name, l_name, username, password } = req.body || {};
 
   if (
     ![f_name, l_name, username, password].every(
@@ -31,7 +31,9 @@ app.post("/signup", async (req, res) => {
     const users = client.db("pa2").collection("users");
     const cleanUsername = username.trim();
 
-    const existingUser = await users.findOne({ username: cleanUsername });
+    const existingUser = await users.findOne({
+      username: cleanUsername,
+    });
 
     if (existingUser) {
       return res.status(409).json({ message: "Username already exists" });
@@ -46,7 +48,9 @@ app.post("/signup", async (req, res) => {
       password: hashedPassword,
     });
 
-    return res.status(201).json({ message: "User created successfully" });
+    return res.status(201).json({
+      message: "User created successfully",
+    });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "Username already exists" });
@@ -57,9 +61,9 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// login route
+// Check login credentials
 app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password } = req.body || {};
 
   if (
     typeof username !== "string" ||
@@ -67,17 +71,21 @@ app.post("/login", async (req, res) => {
     typeof password !== "string" ||
     !password
   ) {
-    return res
-      .status(400)
-      .json({ message: "Username and password are required" });
+    return res.status(400).json({
+      message: "Username and password are required",
+    });
   }
 
   try {
     const users = client.db("pa2").collection("users");
-    const user = await users.findOne({ username: username.trim() });
+    const user = await users.findOne({
+      username: username.trim(),
+    });
 
     if (!user) {
-      return res.status(401).json({ message: "Username does not exist" });
+      return res.status(401).json({
+        message: "Username does not exist",
+      });
     }
 
     const passwordMatches = await bcrypt.compare(password, user.password);
@@ -93,13 +101,305 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// Mongo connection and server start
+// Get users without exposing passwords
+app.get("/users", async (req, res) => {
+  try {
+    const users = await client
+      .db("pa2")
+      .collection("users")
+      .find({}, { projection: { password: 0 } })
+      .toArray();
+
+    return res.status(200).json(users);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      message: "Could not retrieve users",
+    });
+  }
+});
+
+// Create a project and automatically include its lead as a member
+app.post("/projects", async (req, res) => {
+  const { name, description, status, project_lead_id } = req.body || {};
+
+  if (
+    ![name, description, status, project_lead_id].every(
+      (value) => typeof value === "string" && value.trim()
+    )
+  ) {
+    return res.status(400).json({
+      message: "All project fields are required",
+    });
+  }
+
+  if (!["Planning", "Active", "Completed"].includes(status)) {
+    return res.status(400).json({
+      message: "Invalid project status",
+    });
+  }
+
+  if (!ObjectId.isValid(project_lead_id)) {
+    return res.status(400).json({
+      message: "Invalid project lead ID",
+    });
+  }
+
+  const session = client.startSession();
+
+  try {
+    const db = client.db("pa2");
+    const users = db.collection("users");
+    const projects = db.collection("Projects");
+    const memberships = db.collection("ProjectMemberships");
+    const leadId = new ObjectId(project_lead_id);
+
+    const lead = await users.findOne({ _id: leadId });
+
+    if (!lead) {
+      return res.status(404).json({
+        message: "Project lead does not exist",
+      });
+    }
+
+    const project = {
+      _id: new ObjectId(),
+      name: name.trim(),
+      description: description.trim(),
+      status,
+      project_lead_id: leadId,
+    };
+
+    // Save both records together or roll back both on failure
+    await session.withTransaction(async () => {
+      await projects.insertOne(project, { session });
+
+      await memberships.insertOne(
+        {
+          project_id: project._id,
+          user_id: leadId,
+        },
+        { session }
+      );
+    });
+
+    return res.status(201).json({
+      message: "Project created successfully",
+      project,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      message: "Could not create project",
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
+// Retrieve all saved projects
+app.get("/projects", async (req, res) => {
+  try {
+    const projects = await client
+      .db("pa2")
+      .collection("Projects")
+      .find({})
+      .toArray();
+
+    return res.status(200).json(projects);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      message: "Could not retrieve projects",
+    });
+  }
+});
+
+// Retrieve membership records for an existing project
+app.get("/projects/:projectId/members", async (req, res) => {
+  const { projectId } = req.params;
+
+  if (!ObjectId.isValid(projectId)) {
+    return res.status(400).json({ message: "Invalid project ID" });
+  }
+
+  try {
+    const db = client.db("pa2");
+    const projectObjectId = new ObjectId(projectId);
+
+    const project = await db.collection("Projects").findOne({
+      _id: projectObjectId,
+    });
+
+    if (!project) {
+      return res.status(404).json({ message: "Project does not exist" });
+    }
+
+    const memberships = await db
+      .collection("ProjectMemberships")
+      .find({ project_id: projectObjectId })
+      .toArray();
+
+    return res.status(200).json(memberships);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      message: "Could not retrieve project members",
+    });
+  }
+});
+
+// Add a registered user to an existing project
+app.post("/projects/:projectId/members", async (req, res) => {
+  const { projectId } = req.params;
+  const { user_id } = req.body || {};
+
+  if (
+    !ObjectId.isValid(projectId) ||
+    typeof user_id !== "string" ||
+    !ObjectId.isValid(user_id)
+  ) {
+    return res.status(400).json({
+      message: "Valid project and user IDs are required",
+    });
+  }
+
+  try {
+    const db = client.db("pa2");
+    const projectObjectId = new ObjectId(projectId);
+    const userObjectId = new ObjectId(user_id);
+
+    const project = await db.collection("Projects").findOne({
+      _id: projectObjectId,
+    });
+
+    if (!project) {
+      return res.status(404).json({ message: "Project does not exist" });
+    }
+
+    const user = await db.collection("users").findOne({
+      _id: userObjectId,
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User does not exist" });
+    }
+
+    const memberships = db.collection("ProjectMemberships");
+    const membership = {
+      project_id: projectObjectId,
+      user_id: userObjectId,
+    };
+
+    const existingMembership = await memberships.findOne(membership);
+
+    if (existingMembership) {
+      return res.status(409).json({
+        message: "User is already a member of this project",
+      });
+    }
+
+    const result = await memberships.insertOne(membership);
+
+    return res.status(201).json({
+      message: "Member added successfully",
+      membership: {
+        ...membership,
+        _id: result.insertedId,
+      },
+    });
+  } catch (error) {
+    // The unique index also protects against simultaneous duplicate requests
+    if (error.code === 11000) {
+      return res.status(409).json({
+        message: "User is already a member of this project",
+      });
+    }
+
+    console.error(error);
+    return res.status(500).json({ message: "Could not add member" });
+  }
+});
+
+// Remove a non-lead member from a project
+app.delete("/projects/:projectId/members/:userId", async (req, res) => {
+  const { projectId, userId } = req.params;
+
+  if (!ObjectId.isValid(projectId) || !ObjectId.isValid(userId)) {
+    return res.status(400).json({
+      message: "Valid project and user IDs are required",
+    });
+  }
+
+  try {
+    const db = client.db("pa2");
+    const projectObjectId = new ObjectId(projectId);
+    const userObjectId = new ObjectId(userId);
+
+    const project = await db.collection("Projects").findOne({
+      _id: projectObjectId,
+    });
+
+    if (!project) {
+      return res.status(404).json({ message: "Project does not exist" });
+    }
+
+    if (project.project_lead_id.equals(userObjectId)) {
+      return res.status(400).json({
+        message: "The project lead cannot be removed",
+      });
+    }
+
+    const user = await db.collection("users").findOne({
+      _id: userObjectId,
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User does not exist" });
+    }
+
+    const result = await db.collection("ProjectMemberships").deleteOne({
+      project_id: projectObjectId,
+      user_id: userObjectId,
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        message: "User is not a member of this project",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Member removed successfully",
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Could not remove member" });
+  }
+});
+
+// Connect to MongoDB before accepting requests
 async function startServer() {
   try {
     await client.connect();
 
-    const users = client.db("pa2").collection("users");
-    await users.createIndex({ username: 1 }, { unique: true });
+    const db = client.db("pa2");
+
+    await db.collection("users").createIndex(
+      { username: 1 },
+      { unique: true }
+    );
+
+    // Prevent duplicate membership pairs
+    await db.collection("ProjectMemberships").createIndex(
+      { project_id: 1, user_id: 1 },
+      { unique: true }
+    );
+
+    // Ensure the collection exists before using transactions
+    if (!(await db.listCollections({ name: "Projects" }).hasNext())) {
+      await db.createCollection("Projects");
+    }
 
     console.log("Connected to MongoDB");
 
@@ -107,8 +407,10 @@ async function startServer() {
       console.log("Server running on port 9000");
     });
   } catch (error) {
-    console.error("Could not connect to MongoDB");
+    console.error("Could not start server");
     console.error(error);
+    await client.close();
+    process.exitCode = 1;
   }
 }
 
